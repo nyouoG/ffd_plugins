@@ -17,8 +17,8 @@ class DrawConfig(ctypes.Structure):
         ('version', ctypes.c_uint32),
     ]
 
-
-def make_shell(scanner: StaticPatternSearcher, key='_in_game_draw_server_'):
+hook_key='_in_game_draw_server_'
+def make_shell(scanner: StaticPatternSearcher ):
     def repl(m: re.Match):
         match m.group(2):
             case 'sp':
@@ -39,10 +39,10 @@ def make_shell(scanner: StaticPatternSearcher, key='_in_game_draw_server_'):
     # shell_code = re.sub(r'(sp(?:_nu)?|sa(?:_nu)?) =.*', lambda m: '# ' + m.group(0), shell_code)
     shell_code += f'''
 def install():
-    if hasattr(inject_server, {key!r}):
-        return addressof(getattr(inject_server, {key!r}).config)
-        getattr(inject_server, {key!r}).unload()
-    setattr(inject_server, {key!r}, (ds := DrawServer()))
+    if hasattr(inject_server, {hook_key!r}):
+        # return addressof(getattr(inject_server, {hook_key!r}).config)
+        getattr(inject_server, {hook_key!r}).unload()
+    setattr(inject_server, {hook_key!r}, (ds := DrawServer()))
     return addressof(ds.config)
 
 res = install()
@@ -113,6 +113,6 @@ class InGameDraw(FFDrawPlugin):
                 ny_mem.write_memory(self.main.mem.handle, self.p_config, config)
 
     def on_game_window_update(self):
-        self.main.mem.inject_handle.run("if hasattr(inject_server, 'in_game_draw'):getattr(inject_server, 'in_game_draw').swap(args[0])", self.draw_data.getvalue())
+        self.main.mem.inject_handle.run(f"if hasattr(inject_server, {hook_key!r}):getattr(inject_server, {hook_key!r}).swap(args[0])", self.draw_data.getvalue())
         self.draw_data = io.BytesIO()
         return self.old_game_window_update()
