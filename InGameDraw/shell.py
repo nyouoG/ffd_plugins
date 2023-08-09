@@ -40,7 +40,7 @@ kernel_create_vertex_info = CFUNCTYPE(
     c_void_p,  # device *
     c_void_p,  # VertexInput *
     c_uint,  # input size
-)(sp("e8 * * * * 49 ? ? ? ? ? ? 48 ? ? ? 49 ? ? ? ? ? ? 48"))
+)(sp("e8 * * * * 45 ? ? 48 89 87 ? ? ? ? 48 ? ? ? 41"))
 
 
 def free_vertex_info(vertex_info):
