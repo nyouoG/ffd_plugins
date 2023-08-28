@@ -350,21 +350,57 @@ def apply_transform(transform: glm.mat4, vertices):
 empty_vec2 = glm.vec2(0, 0).to_bytes()
 
 
+def lines(line_mode: int, line_vertexes: list[glm.vec4]):
+    if line_mode == DrawCommand.line_list:
+        for i in range(0, len(line_vertexes), 2):
+            yield line_vertexes[i].xyz, line_vertexes[i + 1].xyz
+    elif line_mode == DrawCommand.line_strip:
+        for i in range(len(line_vertexes) - 1):
+            yield line_vertexes[i].xyz, line_vertexes[i + 1].xyz
+    else:
+        raise ValueError(f'line mode {line_mode} not supported')
+
+
+DIR_AB = glm.vec3(0, 0, 1)  # glm.normalize(glm.vec3(0, 0, 1) - glm.vec3(0, 0, 0))
+ROT_MAT_SAME = glm.rotate(math.pi / 2, glm.vec3(0, 0, 1))
+DIR_AB_Rev = -DIR_AB
+ROT_MAT_REV = glm.rotate(math.pi / 2, glm.vec3(0, 0, -1)) * glm.rotate(math.pi, glm.vec3(0, 1, 0))
+
+
+def line_to_transforms(line_mode: int, line_vertexes: list[glm.vec4], transform, width=.1):
+    for a, b in lines(line_mode, line_vertexes):
+        scale = glm.scale(glm.vec3(width, 1, glm.distance(a, b)))
+        DIR_T = glm.normalize(b - a)
+        if DIR_T == DIR_AB:
+            rotate = ROT_MAT_SAME
+        elif DIR_T == DIR_AB_Rev:
+            rotate = ROT_MAT_REV
+        else:
+            rotate = glm.mat4_cast(glm.quatLookAtLH(DIR_T, DIR_AB))
+        translate = glm.translate(a)
+        yield transform * translate * rotate * scale
+
+
 class Model:
+    FLAG_RECT_LINE = 1
     fill_mode: int = DrawCommand.triangle_list
     fill_vertexes: list[glm.vec4] = []
     line_mode: int = DrawCommand.line_list
     line_vertexes: list[glm.vec4] = []
 
     @classmethod
-    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
         if fill_color and cls.fill_vertexes:
             server_3d.draw_command(cls.fill_mode, apply_transform(transform, cls.fill_vertexes), fill_color, priority, p_material, uvs)
         if line_color and cls.line_vertexes:
-            server_3d.draw_command(cls.line_mode, apply_transform(transform, cls.line_vertexes), line_color, priority, p_material, uvs)
+            if flags & cls.FLAG_RECT_LINE:
+                for _transform in line_to_transforms(cls.line_mode, cls.line_vertexes, transform):
+                    server_3d.draw_command(cls.line_mode, apply_transform(_transform, cls.line_vertexes), line_color, priority, p_material, uvs)
+            else:
+                server_3d.draw_command(cls.line_mode, apply_transform(transform, cls.line_vertexes), line_color, priority, p_material, uvs)
 
     @classmethod
-    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
         if fill_color and cls.fill_vertexes:
             buf = io.BytesIO()
             if isinstance(fill_color, list):
@@ -381,13 +417,17 @@ class Model:
                     buf.write(empty_vec2)
             yield cls.fill_mode, len(cls.fill_vertexes), buf.getvalue()
         if line_color and cls.line_vertexes:
-            buf = io.BytesIO()
-            line_bytes = line_color.to_bytes()
-            for v in cls.line_vertexes:
-                buf.write(glm.vec3(transform * v).to_bytes())
-                buf.write(line_bytes)
-                buf.write(empty_vec2)
-            yield cls.line_mode, len(cls.line_vertexes), buf.getvalue()
+            if flags & cls.FLAG_RECT_LINE:
+                for transform in line_to_transforms(cls.line_mode, cls.line_vertexes, transform):
+                    yield from RectF.compile(transform, line_color)
+            else:
+                buf = io.BytesIO()
+                line_bytes = line_color.to_bytes()
+                for v in cls.line_vertexes:
+                    buf.write(glm.vec3(transform * v).to_bytes())
+                    buf.write(line_bytes)
+                    buf.write(empty_vec2)
+                yield cls.line_mode, len(cls.line_vertexes), buf.getvalue()
 
 
 circle_step = 100
@@ -399,6 +439,7 @@ class Circle(Model):
     for i in range(circle_step):
         _a = i / circle_step * math.pi * 2
         line_vertexes.append(glm.vec4(math.cos(_a), 0, math.sin(_a), 1))
+    line_vertexes.append(line_vertexes[0])
 
     fill_mode = DrawCommand.triangle_list
     fill_vertexes = []
@@ -409,12 +450,23 @@ class Circle(Model):
         fill_vertexes.append(center)
 
 
+class Triangle(Model):
+    fill_mode = DrawCommand.triangle_list
+    fill_vertexes = [
+        glm.vec4(1, 0, 0, 1),
+        glm.vec4(-1 / 3 ** .5, 0, 0, 1),
+        glm.vec4(0, 0, 1 / 3 ** .5, 1),
+    ]
+    line_mode = DrawCommand.line_strip
+    line_vertexes = fill_vertexes + [fill_vertexes[0]]
+
+
 class RectF(Model):
     fill_mode = DrawCommand.triangle_strip
     fill_vertexes = [
         glm.vec4(.5, 0, 1, 1),
-        glm.vec4(.5, 0, 0, 1),
         glm.vec4(-.5, 0, 1, 1),
+        glm.vec4(.5, 0, 0, 1),
         glm.vec4(-.5, 0, 0, 1),
     ]
 
@@ -619,20 +671,20 @@ class RectFV2(Model):
         return fill_color
 
     @classmethod
-    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
         fill_color = cls._make_color(fill_color)
-        cls.RectFTR.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs)
-        cls.RectFTL.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs)
-        cls.RectFBR.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs)
-        cls.RectFBL.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs)
+        cls.RectFTR.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs, flags)
+        cls.RectFTL.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs, flags)
+        cls.RectFBR.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs, flags)
+        cls.RectFBL.draw(server_3d, transform, fill_color, line_color, priority, p_material, uvs, flags)
 
     @classmethod
-    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
         fill_color = cls._make_color(fill_color)
-        yield from cls.RectFTR.compile(transform, fill_color, line_color)
-        yield from cls.RectFTL.compile(transform, fill_color, line_color)
-        yield from cls.RectFBR.compile(transform, fill_color, line_color)
-        yield from cls.RectFBL.compile(transform, fill_color, line_color)
+        yield from cls.RectFTR.compile(transform, fill_color, line_color, flags)
+        yield from cls.RectFTL.compile(transform, fill_color, line_color, flags)
+        yield from cls.RectFBR.compile(transform, fill_color, line_color, flags)
+        yield from cls.RectFBL.compile(transform, fill_color, line_color, flags)
 
 
 class RectFBV2(RectFV2):
@@ -690,16 +742,16 @@ class CircleV2(Model):
             return fill_color, fill_color
 
     @classmethod
-    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+    def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
         in_colors, out_colors = cls._make_color(fill_color)
         server_3d.draw_command(cls.fill_mode, apply_transform(transform, cls.fill_vertexes), in_colors, priority, p_material, uvs)
-        cls.outer.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs)
+        cls.outer.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs, flags)
 
     @classmethod
-    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+    def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
         in_colors, out_colors = cls._make_color(fill_color)
-        yield from super().compile(transform, in_colors)
-        yield from cls.outer.compile(transform, out_colors, line_color)
+        yield from super().compile(transform, in_colors, flags=flags)
+        yield from cls.outer.compile(transform, out_colors, line_color, flags=flags)
 
 
 @functools.cache
@@ -732,16 +784,16 @@ def DonutV2(inner_percent):
                 return fill_color, fill_color
 
         @classmethod
-        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            OutDonut.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs)
-            InDonut.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs)
+            OutDonut.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs, flags=flags)
+            InDonut.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs, flags=flags)
 
         @classmethod
-        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            yield from OutDonut.compile(transform, out_colors, line_color)
-            yield from InDonut.compile(transform, in_colors, line_color)
+            yield from OutDonut.compile(transform, out_colors, line_color, flags=flags)
+            yield from InDonut.compile(transform, in_colors, line_color, flags=flags)
 
     return _DonutV2
 
@@ -780,16 +832,16 @@ def FanV2(degree):
             return in_colors, out_colors
 
         @classmethod
-        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            OutFan.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs)
-            InFan.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs)
+            OutFan.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs, flags=flags)
+            InFan.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs, flags=flags)
 
         @classmethod
-        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            yield from OutFan.compile(transform, out_colors, line_color)
-            yield from InFan.compile(transform, in_colors, line_color)
+            yield from OutFan.compile(transform, out_colors, line_color, flags=flags)
+            yield from InFan.compile(transform, in_colors, line_color, flags=flags)
 
     return _FanV2
 
@@ -828,16 +880,16 @@ def DonutFanV2(inner_percent, degree):
             return in_colors, out_colors
 
         @classmethod
-        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None):
+        def draw(cls, server_3d: Server, transform: glm.mat4, fill_color=None, line_color=None, priority=0, p_material=None, uvs=None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            OutDonutFan.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs)
-            InDonutFan.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs)
+            OutDonutFan.draw(server_3d, transform, out_colors, line_color, priority, p_material, uvs, flags=flags)
+            InDonutFan.draw(server_3d, transform, in_colors, line_color, priority, p_material, uvs, flags=flags)
 
         @classmethod
-        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None):
+        def compile(cls, transform: glm.mat4, fill_color: glm.u8vec4 | list[glm.u8vec4] = None, line_color: glm.u8vec4 = None, flags=0):
             in_colors, out_colors = cls._make_color(fill_color)
-            yield from OutDonutFan.compile(transform, out_colors, line_color)
-            yield from InDonutFan.compile(transform, in_colors, line_color)
+            yield from OutDonutFan.compile(transform, out_colors, line_color, flags=flags)
+            yield from InDonutFan.compile(transform, in_colors, line_color, flags=flags)
 
     return _DonutFanV2
 
@@ -853,6 +905,7 @@ def handle_exception(e):
 class DrawConfig(Structure):
     _fields_ = [
         ('version', c_uint32),
+        ('flag', c_uint32),
     ]
 
 
@@ -968,8 +1021,8 @@ class DrawServer:
                         model = rectfb_type if shape & 0xFFFF else rectf_type
                     case 5:  # sector
                         model = fan_type(shape & 0xFFFF)
-                    # case 6:  # triangle
-                    #     return  # not impl
+                    case 6:  # triangle
+                        model = Triangle
                     case 8:  # line
                         model = Line
                     # case 9:  # point
@@ -981,7 +1034,8 @@ class DrawServer:
                 for cmd, vtx_cnt, vtx_data in model.compile(
                         glm.mat4.from_bytes(_transform),
                         glm.u8vec4.from_bytes(_fill_color) if _fill_color[3] != 0 else None,
-                        glm.u8vec4.from_bytes(_line_color) if _line_color[3] != 0 else None
+                        glm.u8vec4.from_bytes(_line_color) if _line_color[3] != 0 else None,
+                        self.config.flag,
                 ):
                     self.compiled_commands.append((cmd, vtx_cnt, vtx_data))
             self.last_update = time.time()

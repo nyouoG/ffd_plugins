@@ -15,22 +15,29 @@ from nylib.utils.win32 import memory as ny_mem
 class DrawConfig(ctypes.Structure):
     _fields_ = [
         ('version', ctypes.c_uint32),
+        ('flag', ctypes.c_uint32),
     ]
 
-hook_key='_in_game_draw_server_'
-def make_shell(scanner: StaticPatternSearcher ):
+
+hook_key = '_in_game_draw_server_'
+
+
+def make_shell(scanner: StaticPatternSearcher):
     def repl(m: re.Match):
-        match m.group(2):
-            case 'sp':
-                val, = scanner.find_point(m.group(3))
-            case 'sp_nu':
-                val, = scanner.find_points(m.group(3))[0]
-            case 'sa':
-                val = scanner.find_address(m.group(3))
-            case 'sa_nu':
-                val = scanner.find_addresses(m.group(3))[0]
-            case _:
-                raise ValueError(f'unknown shell pattern {m.group(2)}')
+        try:
+            match m.group(2):
+                case 'sp':
+                    val, = scanner.find_point(m.group(3))
+                case 'sp_nu':
+                    val, = scanner.find_points(m.group(3))[0]
+                case 'sa':
+                    val = scanner.find_address(m.group(3))
+                case 'sa_nu':
+                    val = scanner.find_addresses(m.group(3))[0]
+                case _:
+                    raise ValueError(f'unknown shell pattern {m.group(2)}')
+        except KeyError:
+            raise ValueError(f'unknown shell pattern {m.group(2)} {m.group(3)}')
         return f'{m.group(1)}{val:#x}'
 
     work_dir = pathlib.Path(__file__).parent
@@ -67,6 +74,7 @@ class InGameDraw(FFDrawPlugin):
         self.draw_data = io.BytesIO()
 
         self.p_config = 0
+        self._flag = 0
 
     def unload(self):
         try:
@@ -91,6 +99,7 @@ class InGameDraw(FFDrawPlugin):
                 self.p_config = self.main.mem.inject_handle.run(shell.encode('utf-8'))
                 config = ny_mem.read_memory(self.main.mem.handle, DrawConfig, self.p_config)
                 config.version = self.data.setdefault('version', 2)
+                config.flag = self.data.setdefault('flag', 0)
                 ny_mem.write_memory(self.main.mem.handle, self.p_config, config)
             except Exception as e:
                 self.logger.error(f'install failed: {e}', exc_info=True)
@@ -107,6 +116,15 @@ class InGameDraw(FFDrawPlugin):
                 hash_change = True
                 config.version = _new_val
                 self.data['version'] = _new_val
+
+            _hash_change, is_check = imgui.checkbox('FLAG_RECT_LINE', bool(config.flag & 1))
+            if _hash_change:
+                hash_change = True
+                if is_check:
+                    config.flag |= 1
+                else:
+                    config.flag &= ~1
+                self.data['flag'] = config.flag
 
             if hash_change:
                 self.storage.save()
