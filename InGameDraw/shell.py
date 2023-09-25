@@ -1,8 +1,12 @@
 import functools
 import io
 import logging
+import pathlib
+import re
 import struct
 import typing
+import zlib
+
 import time
 import math
 from ctypes import *
@@ -18,6 +22,8 @@ sp = lambda sig: 0
 sa_nu = lambda sig: 0
 sa = lambda sig: 0
 
+
+# region draw_raw
 
 class VertexInput(Structure):
     _fields_ = [
@@ -615,6 +621,22 @@ class Line(Model):
     ]
 
 
+class Point(Model):
+    fill_vertexes = [
+        glm.vec4(.1, 0, -.1, 1),  # bottom right
+        glm.vec4(.1, 0, .1, 1),  # center right
+        glm.vec4(-.1, 0, -.1, 1),  # bottom center
+        glm.vec4(-.1, 0, .1, 1),  # center
+    ]
+    line_mode = DrawCommand.line_list
+    line_vertexes = [
+        glm.vec4(0, 0, .1, 1),
+        glm.vec4(0, 0, -.1, 1),
+        glm.vec4(.1, 0, 0, 1),
+        glm.vec4(-.1, 0, 0, 1),
+    ]
+
+
 out_alpha = 1
 in_alpha = 0.4
 in_percent = 0.5
@@ -896,10 +918,329 @@ def DonutFanV2(inner_percent, degree):
 
 y_axis = glm.vec3(0, 1, 0)
 
+# endregion
+
+# region avfx_draw
+res_manager = c_size_t.from_address(sp("48 ? ? * * * * f0 0f c1 8a"))
+# res_manager = sp("48 ? ? * * * * f0 0f c1 8a")
+vfx_dec_ref = CFUNCTYPE(
+    c_uint8,  # success or not
+    c_void_p,  # res_mgr
+    c_void_p,  # res_handle
+    c_void_p,
+    c_int,
+)(sp("e8 * * * * 48 ? ? ? ? ? ? 48 ? ? ? ? ? ? 48 ? ? ? 48 ? ? ? ? ? ? 48 ? ? 74"))
+vfx_dec_ref = lambda *args: None
+vfx_res_load = CFUNCTYPE(
+    c_uint8,  # is_success
+    c_void_p,  # p_vfx
+    c_void_p,  # p_data
+    c_uint,  # size
+    c_void_p,  # parent
+)(sp("e8 * * * * 48 ? ? ? ? 84 ? 40 ? ? ? b9"))
+vfx_res_setup_complete = CFUNCTYPE(
+    c_void_p,  # res_handle
+    c_void_p,  # res_handle
+)(sa("40 ? 48 ? ? ? 48 ? ? 33 ? 8b ? f0 0f c0 83"))
+get_res_sync = CFUNCTYPE(
+    c_void_p,
+    c_void_p,  # p_res_mgr
+    c_void_p,  # cate
+    c_void_p,  # type
+    c_void_p,  # id
+    c_char_p,  # path
+    c_void_p,  # extend
+    c_uint8,  # unk
+)(sp("e8 * * * * 48 ? ? ? ? ? ? 48 89 87 ? ? ? ? 48 ? ? ? ? 48 89 44 24"))
+init_vfx_param = CFUNCTYPE(c_void_p, c_char_p)(sp("e8 * * * * f3 ? ? ? ? ? ? ? 48 ? ? ? ? ? ? 48 ? ? ? 48 ? ? ? ? c7 44 24"))
+set_vfx_p1 = CFUNCTYPE(c_void_p, c_void_p, c_char)(sp("e8 * * * * b2 ? 48 ? ? e8 ? ? ? ? f6 05"))
+set_vfx_p2 = CFUNCTYPE(c_void_p, c_void_p, c_char)(sp("e8 * * * * f6 05 ? ? ? ? ? 74 ? 80 3d ? ? ? ? ? 73"))
+create_omen = CFUNCTYPE(
+    c_int64,  # created_omen
+    c_uint,  # omen_id
+    c_void_p,  # pos
+    c_int64,  # chara
+    c_float,  # speed
+    c_float,  # facing
+    c_float,  # scale_x
+    c_float,  # scale_y
+    c_float,  # scale_z
+    c_ubyte,  # is_enemy
+    c_ubyte  # priority
+)(sp("E8 * * * * 8D 4F ? 48 63 D1 48 89 84 D3 ? ? ? ?"))
+create_vfx = CFUNCTYPE(
+    c_int64,  # created_omen
+    c_char_p,  # res_path
+    c_void_p,  # param
+    c_int8,  # attr # 2
+    c_int8,  # priority # 0
+    c_float,  # pos_x
+    c_float,  # pos_y
+    c_float,  # pos_z
+    c_float,  # scale_x
+    c_float,  # scale_y
+    c_float,  # scale_z
+    c_float,  # facing
+    c_float,  # speed 1
+    c_int32  # offscreen slot -1
+)(sp("e8 * * * * 48 ? ? 48 ? ? 74 ? b2 ? 48 ? ? e8 ? ? ? ? b2 ? 48 ? ? e8 ? ? ? ? f6 05"))
+remove_omen = CFUNCTYPE(c_void_p, c_void_p, c_void_p)(sp("e8 * * * * 4c ? ? 48 ? ? ? ? 48 ? ? ? ? ? ? e8 ? ? ? ? eb"))
+trigger_omen = CFUNCTYPE(c_void_p, c_void_p, c_void_p)(sp("E8 * * * * 48 8B 4F ? 33 D2 E8 ? ? ? ? 48 89 77 ?"))
+set_omen_matrix = CFUNCTYPE(c_void_p, c_void_p, c_void_p)(sp("e8 * * * * 48 ? ? e8 ? ? ? ? 85 ? 74 ? 84"))
+set_omen_color = CFUNCTYPE(c_void_p, c_void_p, c_float, c_float, c_float, c_float)(sa("48 ? ? ? ? ? ? 48 ? ? 74 ? 48 ? ? ? f3 ? ? ? ? ? f3 0f 11 89"))
+
+p = pathlib.Path(__file__).parent
+pre_make_dir = p / 'pre_make'
+
+PACK_TYPE_TO_KEY_MAP = {
+    b"common": 0x00, b"bgcommon": 0x01, b"bg": 0x02, b"cut": 0x03, b"chara": 0x04,
+    b"shader": 0x05, b"ui": 0x06, b"sound": 0x07, b"vfx": 0x08, b"exd": 0x0a,
+    b"game_script": 0x0b, b"music": 0x0c, b"_sqpack_test": 0x12, b"_debug": 0x13,
+}
+
+
+def parse_path(path: str | bytes):
+    if isinstance(path, str): path = path.encode('utf-8')
+    c = PACK_TYPE_TO_KEY_MAP.get(path.split(b'/', 1)[0])
+    *_, t = path.rsplit(b'.', 1)
+    assert c is not None, f"category id is not found at {path.decode('utf-8')} ({path.split(b'/', 1)[0]})"
+    assert 4 >= len(t) > 0, f"file type is not found at {path.decode('utf-8')}"
+    return c, int.from_bytes(t, 'big', signed=False), zlib.crc32(path)
+
+
+fan_regex = re.compile(r'fan_(\d+).avfx$'.encode())
+donut_regex = re.compile(r'donut_(\d+)(?:_(\d+))?.avfx$'.encode())
+
+
+def make_donut(temp, ignore_percent, fan_rad=None):
+    ring_fan = struct.pack('f', (1 - math.cos(fan_rad / 2)) / 2 if fan_rad is not None else 1)
+    _x = .5 * (1 - ignore_percent) / (1 + ignore_percent)
+    x = struct.pack('f', _x)
+    revised = struct.pack('f', 1 / (.5 + _x))
+    _data = bytearray(temp).copy()
+    _data[0x0184:0x0188] = revised
+    _data[0x019c:0x01a0] = revised
+    _data[0x179c:0x17a0] = ring_fan
+    _data[0x17c8:0x17cc] = x
+    _data[0x2244:0x2248] = ring_fan
+    _data[0x2270:0x2274] = x
+    _data[0x2cec:0x2cf0] = ring_fan
+    _data[0x2d18:0x2d1c] = x
+    return _data
+
+
+def make_fan(temp: bytes, radian):
+    ring_fan = struct.pack('f', (1 - math.cos(radian / 2)) / 2)
+    scroll1 = struct.pack('f', 0.45333326 - 3.18309884 * radian)
+    scroll2 = struct.pack('f', 5.40770276 + 14.22240645 * radian)
+    _data = bytearray(temp).copy()
+    _data[0x17bc:0x17c0] = ring_fan
+    _data[0x1a90:0x1a94] = scroll1
+    _data[0x1c74:0x1c78] = scroll1
+    _data[0x2574:0x2578] = ring_fan
+    _data[0x2848:0x284c] = scroll2
+    _data[0x2a2c:0x2a30] = scroll2
+    _data[0x332c:0x3330] = ring_fan
+    return _data
+
+
+class AvfxManager:
+    instance: 'AvfxManager' = None
+
+    def __init__(self):
+        assert AvfxManager.instance is None, 'AvfxManager is singleton'
+        AvfxManager.instance = self
+        self.vfx_map = {}
+        self.tmp_circle = (p / 'template' / 'tmp_circle.avfx').read_bytes()
+        self.tmp_donut = (p / 'template' / 'tmp_donut.avfx').read_bytes()
+        self.tmp_fan = (p / 'template' / 'tmp_fan.avfx').read_bytes()
+        self.tmp_org_donut = (p / 'template' / 'tmp_org_donut.avfx').read_bytes()
+        self.tmp_org_fan = (p / 'template' / 'tmp_org_fan.avfx').read_bytes()
+        self.tmp_rect = (p / 'template' / 'tmp_rect.avfx').read_bytes()
+        self.tmp_rect2 = (p / 'template' / 'tmp_rect2.avfx').read_bytes()
+
+    def add_res(self, path: str | bytes, data: bytes | bytearray, force=False):
+        if isinstance(path, str): path = path.encode('utf-8')
+        assert path.endswith(b'.avfx'), 'now only support .avfx file'
+        if not force and path in self.vfx_map: return
+        cate_, type_, id_ = map(c_uint32, parse_path(path))
+        res = get_res_sync(res_manager.value, addressof(cate_), addressof(type_), addressof(id_), path, 0, 0)
+        if not force and c_uint8.from_address(res + 0XA9).value == 7:
+            self.vfx_map[path] = res
+            return
+        c_uint8.from_address(res + 0XA8).value = 2
+        c_uint8.from_address(res + 0XA9).value = 7
+        p_vfx = c_void_p.from_address(res + 0xC0)
+        if isinstance(data, bytes):
+            buffer = (c_uint8 * len(data)).from_buffer_copy(data)
+        else:
+            buffer = (c_uint8 * len(data)).from_buffer(data)
+        if not vfx_res_load(p_vfx, buffer, len(data), res):
+            vfx_dec_ref(res_manager.value, res, 0, 0)
+            raise Exception('init data fail')
+        vfx_res_setup_complete(res)
+        self.remove_res(path)
+        self.vfx_map[path] = res
+
+    def remove_res(self, path: str | bytes):
+        if isinstance(path, str): path = path.encode('utf-8')
+        if old_vfx := self.vfx_map.pop(path, None):
+            vfx_dec_ref(res_manager.value, old_vfx, 0, 0)
+
+    def unload(self):
+        while self.vfx_map:
+            self.remove_res(next(iter(self.vfx_map.keys())))
+
+    def check_is_custom(self, path: bytes):
+        path = path.rstrip(b'\0')
+        if path in self.vfx_map:
+            return
+        if path.startswith(b'vfx/omen/eff/ffd/'):
+            fn = path[17:]
+            if fn == b'circle.avfx':
+                return self.add_res(path, self.tmp_circle)
+            if fn == b'rect.avfx':
+                return self.add_res(path, self.tmp_rect)
+            if fn == b'rect2.avfx':
+                return self.add_res(path, self.tmp_rect2)
+            if m := fan_regex.match(fn):
+                deg = int(m.group(1))
+                return self.add_res(path, make_fan(self.tmp_fan, math.radians(deg)))
+            if m := donut_regex.match(fn):
+                ignore_percent = int(m.group(1)) / 0xffff
+                fan_rad = math.radians(int(m.group(2))) if m.group(2) else None
+                return self.add_res(path, make_donut(self.tmp_donut, ignore_percent, fan_rad))
+        elif path.startswith(b'vfx/omen/eff/org/'):
+            fn = path[17:]
+            if m := fan_regex.match(fn):
+                deg = int(m.group(1))
+                return self.add_res(path, make_fan(self.tmp_org_fan, math.radians(deg)))
+            if m := donut_regex.match(fn):
+                ignore_percent = int(m.group(1)) / 0xffff
+                fan_rad = math.radians(int(m.group(2))) if m.group(2) else None
+                return self.add_res(path, make_donut(self.tmp_org_donut, ignore_percent, fan_rad))
+        elif path.startswith(b'vfx/omen/eff/pmk/'):
+            return self.add_res(path, (pre_make_dir / path[17:].decode()).read_bytes())
+
+
+AVFX_WANT_KILL = 0
+AVFX_CONTINUE = 1
+AVFX_WANT_UPDATE = 2
+
+
+class AvfxOmen:
+    omen_key: bytes | int = None
+    scale: glm.vec3 = None
+    facing: float = None
+    trans: glm.vec3 = None
+    color: glm.vec4 = None
+    set_to: 'AvfxOmen' = None
+    state = 0
+    last_update = 0
+    handle = 0
+
+    def __del__(self):
+        self.destroy()
+
+    def set(self, omen_key, trans: bytes, scale: bytes, facing: float, color: bytes):
+        real = AvfxOmen()
+        real.omen_key = omen_key
+        real.trans = glm.vec3.from_bytes(trans)
+        real.scale = glm.vec3.from_bytes(scale)
+        real.facing = facing
+        real.color = glm.vec4.from_bytes(color)
+        self.set_to = real
+        self.state = AVFX_WANT_UPDATE
+        self.last_update = time.time()
+
+    def update(self):
+        if self.last_update + 3 < time.time():
+            self.state = AVFX_WANT_KILL
+        if self.state == AVFX_WANT_UPDATE:
+            if self.set_to is None:
+                self.state = AVFX_WANT_KILL
+            else:
+                if self.omen_key != self.set_to.omen_key:
+                    self.scale = self.set_to.scale
+                    self.facing = self.set_to.facing
+                    self.trans = self.set_to.trans
+                    self.color = self.set_to.color
+                    self.omen_key = self.set_to.omen_key
+                    self.create()
+                else:
+                    any_mat_change = False
+                    if self.scale != self.set_to.scale:
+                        self.scale = self.set_to.scale
+                        any_mat_change = True
+                    if self.facing != self.set_to.facing:
+                        self.facing = self.set_to.facing
+                        any_mat_change = True
+                    if self.trans != self.set_to.trans:
+                        self.trans = self.set_to.trans
+                        any_mat_change = True
+                    if any_mat_change:
+                        self.update_pos()
+                    if self.color != self.set_to.color:
+                        self.color = self.set_to.color
+                        self.update_color()
+                self.state = AVFX_CONTINUE
+                self.set_to = None
+        if self.state == AVFX_WANT_KILL:
+            self.destroy()
+
+    def create(self):
+        self.destroy()
+        if not self.omen_key: return
+        if isinstance(self.omen_key, int):
+            self.handle = create_omen(self.omen_key, glm.value_ptr(self.trans), 0, 1, self.facing, *self.scale, 1, 0)
+        else:
+            AvfxManager.instance.check_is_custom(self.omen_key)
+            param = (c_char * 0x1a0)()
+            init_vfx_param(param)
+            self.handle = create_vfx(self.omen_key, param, 2, 0, *self.trans, *self.scale, self.facing, 1, -1)
+            if self.handle:
+                set_vfx_p1(self.handle, 1)
+                set_vfx_p2(self.handle, 1)
+        self.update_color()
+
+    def update_pos(self):
+        if self.handle:
+            mat = (glm.translate(self.trans) *
+                   glm.rotate(self.facing, glm.vec3(0, 1, 0)) *
+                   glm.scale(self.scale))
+            set_omen_matrix(self.handle, glm.value_ptr(mat))
+
+    def update_color(self):
+        if self.handle and self.color:
+            set_omen_color(self.handle, *self.color)
+
+    def destroy(self):
+        if self.handle:
+            try:
+                remove_omen(self.handle, 1)
+            except OSError:
+                logger.error(f"omen destroy error: {self.handle:x}", exc_info=True)
+            self.handle = 0
+
+    def copy(self):
+        new_omen = AvfxOmen()
+        new_omen.omen_key = self.omen_key
+        new_omen.scale = self.scale
+        new_omen.facing = self.facing
+        new_omen.trans = self.trans
+        new_omen.color = self.color
+        new_omen.state = AVFX_WANT_UPDATE
+        return new_omen
+
+
+class AvfxServer:
+    pass
+
+
+# endregion
 
 def handle_exception(e):
-    import traceback
-    windll.user32.MessageBoxW(None, str(e) + "\n\n" + traceback.format_exc(), "Error", 0)
+    logger.error(f"draw server error: {e}", exc_info=e)
 
 
 class DrawConfig(Structure):
@@ -925,14 +1266,30 @@ class DrawServer:
         )(self.on_end).install_and_enable()
 
         self.put_buffer = None
+        self.avfx_buffer = None
         self.compiled_commands = []
         self.last_update = 0
         self.config = DrawConfig()
+
+        self.avfx_counter = 0
+        self.avfx_omens = {}
+        self.avfx_mgr = AvfxManager()
+
+        # self.avfx_omens[self.create_omen(
+        #     # b'i1',
+        #     # b'vfx/omen/eff/ffd/circle.avfx',
+        #     # b'vfx/omen/eff/ffd/fan_270.avfx',
+        #     # b'vfx/omen/eff/ffd/donut_%d.avfx' % int(.75 * 0xffff),
+        #     glm.vec3(-10, 0, -10).to_bytes(), glm.vec3(5).to_bytes(), 0, glm.vec4(.9, .1, .7, 1).to_bytes()
+        # )].last_update = 1e+99
 
     def __del__(self):
         self.unload()
 
     def unload(self):
+        for omen in self.avfx_omens.values():
+            omen.destroy()
+        self.avfx_mgr.unload()
         self.begin_hook.uninstall()
         self.end_hook.uninstall()
         if self.server_3d:
@@ -983,8 +1340,18 @@ class DrawServer:
 
     # impl for rpc
 
-    def swap(self, data: bytes):
+    def create_omen(self, omen_key: bytes, trans: bytes, scale: bytes, facing: float, color: bytes):
+        holder = AvfxOmen()
+        if omen_key.startswith(b'i'): omen_key = int(omen_key[1:])
+        holder.set(omen_key, trans, scale, facing, color)
+        self.avfx_counter += 1
+        k = self.avfx_counter
+        self.avfx_omens[k] = holder
+        return k
+
+    def swap(self, data: bytes, avfx_data: bytes = None):
         self.put_buffer = data
+        self.avfx_buffer = avfx_data
 
     def flush(self):
         if self.server_2d:
@@ -1025,8 +1392,9 @@ class DrawServer:
                         model = Triangle
                     case 8:  # line
                         model = Line
-                    # case 9:  # point
-                    #     return  # not impl
+                    case 9:  # point
+                        model = Point
+                        # return # not implemented
                     case 0x101:
                         model = Arrow
                     case _:
@@ -1044,3 +1412,32 @@ class DrawServer:
 
         for cmd, vtx_cnt, vtx_data in self.compiled_commands:
             memmove(self.server_3d.create_command(cmd, vtx_cnt), vtx_data, len(vtx_data))
+
+        omen: AvfxOmen
+        if self.avfx_buffer is not None:
+            off = 0
+            max_off = len(self.avfx_buffer)
+            current = time.time()
+            while off < max_off:
+                omen_id, command_id = struct.unpack_from("<II", self.avfx_buffer, off)
+                off += 8
+                if command_id == AVFX_CONTINUE:
+                    if not (omen := self.avfx_omens.get(omen_id)): continue
+                    omen.last_update = current
+                elif command_id == AVFX_WANT_UPDATE:
+                    omen_key, trans, scale, facing, color = struct.unpack_from("<64s12s12sf16s", self.avfx_buffer, off)
+                    off += 108
+                    if not (omen := self.avfx_omens.get(omen_id)): continue
+                    omen_key = omen_key[:omen_key.find(b'\0')]
+                    if omen_key.startswith(b'i'):
+                        omen_key = int(omen_key[1:])
+                    omen.set(omen_key, trans, scale, facing, color)
+                elif command_id == AVFX_WANT_KILL:
+                    if not (omen := self.avfx_omens.pop(omen_id, None)): continue
+                    omen.state = AVFX_WANT_KILL
+        for k in list(self.avfx_omens.keys()):
+            omen = self.avfx_omens[k]
+            omen.update()
+            if omen.state == AVFX_WANT_KILL:
+                self.avfx_omens.pop(k, None)
+                omen.destroy()
