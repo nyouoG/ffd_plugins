@@ -614,12 +614,13 @@ class Arrow(Model):
 
 
 class Line(Model):
-    line_mode = DrawCommand.line_list
-    line_vertexes = [
-        glm.vec4(0, 0, 0, 1),
-        glm.vec4(0, 0, 1, 1),
+    fill_mode = DrawCommand.triangle_strip
+    fill_vertexes = [
+        glm.vec4(.05, 0, 1, 1),
+        glm.vec4(-.05, 0, 1, 1),
+        glm.vec4(.05, 0, 0, 1),
+        glm.vec4(-.05, 0, 0, 1),
     ]
-
 
 class Point(Model):
     fill_vertexes = [
@@ -1393,8 +1394,8 @@ class DrawServer:
                     case 8:  # line
                         model = Line
                     case 9:  # point
-                        model = Point
-                        # return # not implemented
+                        # model = Point
+                        return # not implemented
                     case 0x101:
                         model = Arrow
                     case _:

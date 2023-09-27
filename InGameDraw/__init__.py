@@ -323,8 +323,12 @@ class InGameDraw(FFDrawPlugin):
                 self.avfx_data.write(struct.pack("<II", omen_id, 1))
 
     def on_add_3d_shape(self, shape, transform: glm.mat4, surface_color=None, line_color=None, line_width=3.0, point_color=None, point_size=5.0):
-        if shape >> 16 == 9:
+        shape_type = shape >> 16
+        if shape_type == 9:
             return self.old_add_3d_shape(shape, transform, surface_color, line_color, line_width, point_color, point_size)
+        if shape_type == 8:
+            transform *= glm.scale(glm.vec3(line_width, 1, 1))
+            surface_color = line_color
         self.draw_data.write(struct.pack('I', shape))
         self.draw_data.write(transform.to_bytes())
         self.draw_data.write(vec4f_to_vec4i8(surface_color) if surface_color else empty_color)
